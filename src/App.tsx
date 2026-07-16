@@ -13,7 +13,7 @@ function App() {
 
   const handleFileSelect = async (file: File) => {
     const bytes = await file.arrayBuffer()
-    setLoadedPdf({ file, bytes })
+    setLoadedPdf({ file, bytes: bytes.slice(0) })
   }
 
   return (

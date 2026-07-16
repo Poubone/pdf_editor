@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { loadPdfDocument } from '../lib/pdfLoader'
 import { downloadBytes, exportPdfWithAnnotations } from '../lib/pdfExport'
@@ -31,6 +31,11 @@ export function PdfEditor({ file, pdfBytes, onNewDocument }: PdfEditorProps) {
     height: number
   } | null>(null)
   const [isExporting, setIsExporting] = useState(false)
+  const exportBytesRef = useRef<ArrayBuffer>(pdfBytes)
+
+  useEffect(() => {
+    exportBytesRef.current = pdfBytes.slice(0)
+  }, [pdfBytes])
 
   useEffect(() => {
     let cancelled = false
@@ -141,7 +146,7 @@ export function PdfEditor({ file, pdfBytes, onNewDocument }: PdfEditorProps) {
   const handleDownload = async () => {
     setIsExporting(true)
     try {
-      const bytes = await exportPdfWithAnnotations(pdfBytes, annotations)
+      const bytes = await exportPdfWithAnnotations(exportBytesRef.current, annotations)
       const baseName = file.name.replace(/\.pdf$/i, '') || 'document'
       downloadBytes(bytes, `${baseName}-modifie.pdf`)
     } finally {
