@@ -1,4 +1,5 @@
 import { PDFDocument, rgb } from 'pdf-lib'
+import { cloneArrayBuffer } from './cloneArrayBuffer'
 import type { Annotation, StrokeAnnotation } from '../types'
 
 function hexToRgb(hex: string) {
@@ -70,7 +71,7 @@ export async function exportPdfWithAnnotations(
   pdfBytes: ArrayBuffer,
   annotations: Annotation[],
 ): Promise<Uint8Array> {
-  const pdfDoc = await PDFDocument.load(pdfBytes)
+  const pdfDoc = await PDFDocument.load(cloneArrayBuffer(pdfBytes))
   const pages = pdfDoc.getPages()
 
   for (const annotation of annotations) {

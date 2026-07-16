@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { loadPdfDocument } from '../lib/pdfLoader'
 import { downloadBytes, exportPdfWithAnnotations } from '../lib/pdfExport'
@@ -17,12 +17,13 @@ export function PdfEditor({ file, pdfBytes, onNewDocument }: PdfEditorProps) {
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null)
   const [annotations, setAnnotations] = useState<Annotation[]>([])
   const [history, setHistory] = useState<Annotation[][]>([[]])
-  const [tool, setTool] = useState<Tool>('text')
+  const [tool, setTool] = useState<Tool>('select')
   const [fontSize, setFontSize] = useState(16)
   const [strokeWidth, setStrokeWidth] = useState(2)
   const [color, setColor] = useState('#1a1a2e')
   const [zoom, setZoom] = useState(1.2)
   const [currentPage, setCurrentPage] = useState(0)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
   const [showSignatureModal, setShowSignatureModal] = useState(false)
   const [pendingSignature, setPendingSignature] = useState<{
     dataUrl: string
@@ -30,6 +31,11 @@ export function PdfEditor({ file, pdfBytes, onNewDocument }: PdfEditorProps) {
     height: number
   } | null>(null)
   const [isExporting, setIsExporting] = useState(false)
+  const exportBytesRef = useRef<ArrayBuffer>(pdfBytes)
+
+  useEffect(() => {
+    exportBytesRef.current = pdfBytes.slice(0)
+  }, [pdfBytes])
 
   useEffect(() => {
     let cancelled = false
@@ -66,11 +72,30 @@ export function PdfEditor({ file, pdfBytes, onNewDocument }: PdfEditorProps) {
     [annotations, pushAnnotations],
   )
 
+  const updateAnnotationsLive = useCallback((next: Annotation[]) => {
+    setAnnotations(next)
+  }, [])
+
+  const commitAnnotations = useCallback(
+    (next: Annotation[]) => {
+      pushAnnotations(next)
+    },
+    [pushAnnotations],
+  )
+
+  const deleteSelected = useCallback(() => {
+    if (!selectedId) return
+    const next = annotations.filter((annotation) => annotation.id !== selectedId)
+    pushAnnotations(next)
+    setSelectedId(null)
+  }, [annotations, pushAnnotations, selectedId])
+
   const undo = useCallback(() => {
     setHistory((previous) => {
       if (previous.length <= 1) return previous
       const nextHistory = previous.slice(0, -1)
       setAnnotations(nextHistory[nextHistory.length - 1])
+      setSelectedId(null)
       return nextHistory
     })
   }, [])
@@ -80,11 +105,18 @@ export function PdfEditor({ file, pdfBytes, onNewDocument }: PdfEditorProps) {
       if ((event.ctrlKey || event.metaKey) && event.key === 'z') {
         event.preventDefault()
         undo()
+        return
+      }
+      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedId) {
+        const target = event.target as HTMLElement
+        if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
+        event.preventDefault()
+        deleteSelected()
       }
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [undo])
+  }, [undo, deleteSelected, selectedId])
 
   const handleSignatureConfirm = (dataUrl: string, width: number, height: number) => {
     setShowSignatureModal(false)
@@ -96,8 +128,9 @@ export function PdfEditor({ file, pdfBytes, onNewDocument }: PdfEditorProps) {
     if (!pendingSignature) return
 
     const scale = 0.35
+    const newId = crypto.randomUUID()
     addAnnotation({
-      id: crypto.randomUUID(),
+      id: newId,
       type: 'image',
       pageIndex,
       x: x - (pendingSignature.width * scale) / 2,
@@ -107,12 +140,13 @@ export function PdfEditor({ file, pdfBytes, onNewDocument }: PdfEditorProps) {
       dataUrl: pendingSignature.dataUrl,
     })
     setPendingSignature(null)
+    setSelectedId(newId)
   }
 
   const handleDownload = async () => {
     setIsExporting(true)
     try {
-      const bytes = await exportPdfWithAnnotations(pdfBytes, annotations)
+      const bytes = await exportPdfWithAnnotations(exportBytesRef.current, annotations)
       const baseName = file.name.replace(/\.pdf$/i, '') || 'document'
       downloadBytes(bytes, `${baseName}-modifie.pdf`)
     } finally {
@@ -132,6 +166,9 @@ export function PdfEditor({ file, pdfBytes, onNewDocument }: PdfEditorProps) {
           if (nextTool !== 'signature') {
             setShowSignatureModal(false)
           }
+          if (nextTool !== 'select') {
+            setSelectedId(null)
+          }
           setTool(nextTool)
         }}
         fontSize={fontSize}
@@ -144,12 +181,17 @@ export function PdfEditor({ file, pdfBytes, onNewDocument }: PdfEditorProps) {
         onZoomChange={setZoom}
         currentPage={currentPage}
         totalPages={pdfDoc.numPages}
-        onPageChange={setCurrentPage}
+        onPageChange={(page) => {
+          setCurrentPage(page)
+          setSelectedId(null)
+        }}
         onUndo={undo}
         onDownload={handleDownload}
         canUndo={history.length > 1}
         isExporting={isExporting}
         onNewDocument={onNewDocument}
+        onDeleteSelected={deleteSelected}
+        canDelete={Boolean(selectedId)}
       />
 
       <div className="editor-canvas">
@@ -163,7 +205,11 @@ export function PdfEditor({ file, pdfBytes, onNewDocument }: PdfEditorProps) {
           strokeWidth={strokeWidth}
           fontSize={fontSize}
           pendingSignature={pendingSignature?.dataUrl ?? null}
+          selectedId={selectedId}
+          onSelectId={setSelectedId}
           onAddAnnotation={addAnnotation}
+          onUpdateAnnotations={updateAnnotationsLive}
+          onCommitAnnotations={commitAnnotations}
           onPlaceSignature={placeSignature}
           onClearPendingSignature={() => setPendingSignature(null)}
         />

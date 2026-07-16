@@ -280,6 +280,80 @@
   cursor: default;
 }
 
+.cursor-grabbing {
+  cursor: grabbing;
+}
+
+.selection-overlay {
+  position: absolute;
+  border: 2px dashed var(--accent);
+  background: rgba(79, 140, 255, 0.06);
+  box-sizing: border-box;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.selection-move-area {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
+  cursor: grab;
+}
+
+.selection-move-area:active {
+  cursor: grabbing;
+}
+
+.selection-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: white;
+  border: 2px solid var(--accent);
+  border-radius: 2px;
+  pointer-events: auto;
+  box-sizing: border-box;
+}
+
+.selection-handle-nw {
+  top: -5px;
+  left: -5px;
+  cursor: nwse-resize;
+}
+
+.selection-handle-ne {
+  top: -5px;
+  right: -5px;
+  cursor: nesw-resize;
+}
+
+.selection-handle-sw {
+  bottom: -5px;
+  left: -5px;
+  cursor: nesw-resize;
+}
+
+.selection-handle-se {
+  bottom: -5px;
+  right: -5px;
+  cursor: nwse-resize;
+}
+
+.selection-hint {
+  position: absolute;
+  bottom: -2.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0.35rem 0.75rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  z-index: 6;
+}
+
 .cursor-text {
   cursor: text;
 }

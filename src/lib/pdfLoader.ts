@@ -1,4 +1,5 @@
 import * as pdfjs from 'pdfjs-dist'
+import { cloneArrayBuffer } from './cloneArrayBuffer'
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
@@ -6,7 +7,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 ).toString()
 
 export async function loadPdfDocument(data: ArrayBuffer) {
-  const loadingTask = pdfjs.getDocument({ data })
+  const loadingTask = pdfjs.getDocument({ data: cloneArrayBuffer(data) })
   return loadingTask.promise
 }
 

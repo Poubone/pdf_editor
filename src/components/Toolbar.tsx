@@ -19,6 +19,8 @@ type ToolbarProps = {
   canUndo: boolean
   isExporting: boolean
   onNewDocument: () => void
+  onDeleteSelected: () => void
+  canDelete: boolean
 }
 
 const tools: { id: Tool; label: string; icon: string }[] = [
@@ -47,6 +49,8 @@ export function Toolbar({
   canUndo,
   isExporting,
   onNewDocument,
+  onDeleteSelected,
+  canDelete,
 }: ToolbarProps) {
   return (
     <div className="toolbar">
@@ -159,6 +163,15 @@ export function Toolbar({
           title="Annuler (Ctrl+Z)"
         >
           ↩ Annuler
+        </button>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={onDeleteSelected}
+          disabled={!canDelete}
+          title="Supprimer (Suppr)"
+        >
+          🗑 Supprimer
         </button>
         <button type="button" className="btn btn-ghost" onClick={onNewDocument}>
           Nouveau PDF
