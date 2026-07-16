@@ -1,7 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
+import {
+  applyMove,
+  applyResize,
+  getAnnotationBounds,
+  hitTestAnnotation,
+  type ResizeHandle,
+} from '../lib/annotationBounds'
 import { renderPageToCanvas } from '../lib/pdfLoader'
 import type { Annotation, Point, Tool } from '../types'
+import { SelectionOverlay } from './SelectionOverlay'
 
 type PdfPageProps = {
   pdfDoc: PDFDocumentProxy
@@ -13,9 +21,31 @@ type PdfPageProps = {
   strokeWidth: number
   fontSize: number
   pendingSignature: string | null
+  selectedId: string | null
+  onSelectId: (id: string | null) => void
   onAddAnnotation: (annotation: Annotation) => void
+  onUpdateAnnotations: (annotations: Annotation[]) => void
+  onCommitAnnotations: (annotations: Annotation[]) => void
   onPlaceSignature: (pageIndex: number, x: number, y: number) => void
   onClearPendingSignature: () => void
+}
+
+type DragState = {
+  id: string
+  mode: 'move' | ResizeHandle
+  startPoint: Point
+  startAnnotations: Annotation[]
+}
+
+const imageCache = new Map<string, HTMLImageElement>()
+
+function getCachedImage(dataUrl: string): HTMLImageElement {
+  const cached = imageCache.get(dataUrl)
+  if (cached) return cached
+  const image = new Image()
+  image.src = dataUrl
+  imageCache.set(dataUrl, image)
+  return image
 }
 
 function drawStroke(
@@ -47,17 +77,34 @@ export function PdfPage({
   strokeWidth,
   fontSize,
   pendingSignature,
+  selectedId,
+  onSelectId,
   onAddAnnotation,
+  onUpdateAnnotations,
+  onCommitAnnotations,
   onPlaceSignature,
   onClearPendingSignature,
 }: PdfPageProps) {
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null)
   const overlayRef = useRef<HTMLCanvasElement>(null)
+  const measureContextRef = useRef<CanvasRenderingContext2D | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 })
   const [isDrawing, setIsDrawing] = useState(false)
   const [currentStroke, setCurrentStroke] = useState<Point[]>([])
   const [textPrompt, setTextPrompt] = useState<{ x: number; y: number } | null>(null)
   const [textValue, setTextValue] = useState('')
+  const [dragState, setDragState] = useState<DragState | null>(null)
+  const annotationsRef = useRef(annotations)
+
+  useEffect(() => {
+    annotationsRef.current = annotations
+  }, [annotations])
+
+  useEffect(() => {
+    const canvas = document.createElement('canvas')
+    measureContextRef.current = canvas.getContext('2d')
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -68,7 +115,8 @@ export function PdfPage({
 
       const page = await pdfDoc.getPage(pageIndex + 1)
       if (cancelled) return
-      await renderPageToCanvas(page, canvas, scale)
+      const dimensions = await renderPageToCanvas(page, canvas, scale)
+      setCanvasSize(dimensions)
       redrawOverlay()
     }
 
@@ -82,7 +130,7 @@ export function PdfPage({
   useEffect(() => {
     redrawOverlay()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [annotations, currentStroke])
+  }, [annotations, currentStroke, selectedId])
 
   const redrawOverlay = () => {
     const overlay = overlayRef.current
@@ -107,9 +155,8 @@ export function PdfPage({
       } else if (annotation.type === 'stroke') {
         drawStroke(context, annotation.points, annotation.color, annotation.width)
       } else if (annotation.type === 'image') {
-        const image = new Image()
-        image.src = annotation.dataUrl
-        image.onload = () => {
+        const image = getCachedImage(annotation.dataUrl)
+        if (image.complete) {
           context.drawImage(
             image,
             annotation.x,
@@ -117,6 +164,8 @@ export function PdfPage({
             annotation.width,
             annotation.height,
           )
+        } else {
+          image.onload = () => redrawOverlay()
         }
       }
     }
@@ -126,7 +175,7 @@ export function PdfPage({
     }
   }
 
-  const getPoint = (event: React.PointerEvent<HTMLCanvasElement>): Point => {
+  const getPoint = (event: React.PointerEvent): Point => {
     const canvas = overlayRef.current
     if (!canvas) return { x: 0, y: 0 }
     const rect = canvas.getBoundingClientRect()
@@ -138,17 +187,102 @@ export function PdfPage({
     }
   }
 
+  const getMeasureContext = () => {
+    if (!measureContextRef.current) {
+      const canvas = document.createElement('canvas')
+      measureContextRef.current = canvas.getContext('2d')
+    }
+    return measureContextRef.current
+  }
+
+  const startDrag = (id: string, mode: 'move' | ResizeHandle, point: Point) => {
+    onSelectId(id)
+    setDragState({
+      id,
+      mode,
+      startPoint: point,
+      startAnnotations: annotations,
+    })
+  }
+
+  useEffect(() => {
+    if (!dragState) return
+
+    const handleWindowPointerMove = (event: PointerEvent) => {
+      const canvas = overlayRef.current
+      const measureContext = getMeasureContext()
+      if (!canvas || !measureContext) return
+
+      const rect = canvas.getBoundingClientRect()
+      const scaleX = canvas.width / rect.width
+      const scaleY = canvas.height / rect.height
+      const point = {
+        x: (event.clientX - rect.left) * scaleX,
+        y: (event.clientY - rect.top) * scaleY,
+      }
+
+      const startAnnotation = dragState.startAnnotations.find(
+        (annotation) => annotation.id === dragState.id,
+      )
+      if (!startAnnotation) return
+
+      const startBounds = getAnnotationBounds(startAnnotation, measureContext)
+      if (!startBounds) return
+
+      const nextAnnotations = dragState.startAnnotations.map((annotation) => {
+        if (annotation.id !== dragState.id) return annotation
+
+        if (dragState.mode === 'move') {
+          return applyMove(
+            annotation,
+            point.x - dragState.startPoint.x,
+            point.y - dragState.startPoint.y,
+          )
+        }
+
+        return applyResize(annotation, dragState.mode, point, startBounds, startAnnotation)
+      })
+
+      onUpdateAnnotations(nextAnnotations)
+    }
+
+    const handleWindowPointerUp = () => {
+      onCommitAnnotations(annotationsRef.current)
+      setDragState(null)
+    }
+
+    window.addEventListener('pointermove', handleWindowPointerMove)
+    window.addEventListener('pointerup', handleWindowPointerUp)
+    return () => {
+      window.removeEventListener('pointermove', handleWindowPointerMove)
+      window.removeEventListener('pointerup', handleWindowPointerUp)
+    }
+  }, [dragState, onUpdateAnnotations, onCommitAnnotations])
+
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const point = getPoint(event)
+    const measureContext = getMeasureContext()
+    if (!measureContext) return
 
     if (pendingSignature) {
       onPlaceSignature(pageIndex, point.x, point.y)
       return
     }
 
+    if (tool === 'select') {
+      const hit = hitTestAnnotation(point, annotations, pageIndex, measureContext, selectedId)
+      if (hit) {
+        startDrag(hit.id, hit.mode, point)
+        return
+      }
+      onSelectId(null)
+      return
+    }
+
     if (tool === 'text') {
       setTextPrompt(point)
       setTextValue('')
+      onSelectId(null)
       return
     }
 
@@ -156,12 +290,16 @@ export function PdfPage({
       overlayRef.current?.setPointerCapture(event.pointerId)
       setIsDrawing(true)
       setCurrentStroke([point])
+      onSelectId(null)
     }
   }
 
   const handlePointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!isDrawing || tool !== 'draw') return
     const point = getPoint(event)
+    const measureContext = getMeasureContext()
+    if (!measureContext) return
+
+    if (!isDrawing || tool !== 'draw') return
     setCurrentStroke((previous) => [...previous, point])
   }
 
@@ -189,8 +327,9 @@ export function PdfPage({
       return
     }
 
+    const newId = crypto.randomUUID()
     onAddAnnotation({
-      id: crypto.randomUUID(),
+      id: newId,
       type: 'text',
       pageIndex,
       x: textPrompt.x,
@@ -199,9 +338,17 @@ export function PdfPage({
       fontSize,
       color,
     })
+    onSelectId(newId)
     setTextPrompt(null)
     setTextValue('')
   }
+
+  const selectedAnnotation = annotations.find((annotation) => annotation.id === selectedId)
+  const measureContext = getMeasureContext()
+  const selectionBounds =
+    selectedAnnotation && measureContext && tool === 'select'
+      ? getAnnotationBounds(selectedAnnotation, measureContext)
+      : null
 
   const cursorClass = pendingSignature
     ? 'cursor-place'
@@ -209,7 +356,11 @@ export function PdfPage({
       ? 'cursor-text'
       : tool === 'draw'
         ? 'cursor-draw'
-        : 'cursor-default'
+        : dragState?.mode === 'move'
+          ? 'cursor-grabbing'
+          : tool === 'select'
+            ? 'cursor-default'
+            : 'cursor-default'
 
   return (
     <div className="pdf-page" ref={containerRef}>
@@ -222,12 +373,38 @@ export function PdfPage({
         onPointerUp={handlePointerUp}
         onPointerLeave={handlePointerUp}
       />
+      {selectionBounds && canvasSize.width > 0 && (
+        <SelectionOverlay
+          bounds={selectionBounds}
+          canvasWidth={canvasSize.width}
+          canvasHeight={canvasSize.height}
+          onMovePointerDown={(event) => {
+            event.preventDefault()
+            const point = getPoint(event)
+            if (selectedId) {
+              startDrag(selectedId, 'move', point)
+            }
+          }}
+          onHandlePointerDown={(handle, event) => {
+            event.preventDefault()
+            const point = getPoint(event)
+            if (selectedId) {
+              startDrag(selectedId, handle, point)
+            }
+          }}
+        />
+      )}
       {pendingSignature && (
         <div className="placement-hint">
           Cliquez sur la page pour placer votre signature
           <button type="button" className="btn btn-ghost btn-sm" onClick={onClearPendingSignature}>
             Annuler
           </button>
+        </div>
+      )}
+      {tool === 'select' && selectedId && (
+        <div className="selection-hint">
+          Glissez pour déplacer · Poignées pour redimensionner
         </div>
       )}
       {textPrompt && (
