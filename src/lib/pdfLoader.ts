@@ -34,5 +34,6 @@ export async function renderPageToCanvas(
   return {
     width: viewport.width,
     height: viewport.height,
+    scale: viewport.scale,
   }
 }

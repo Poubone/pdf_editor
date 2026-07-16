@@ -83,7 +83,7 @@ export async function exportPdfWithAnnotations(
     if (annotation.type === 'text') {
       page.drawText(annotation.text, {
         x: annotation.x,
-        y: pageHeight - annotation.y - annotation.fontSize,
+        y: pageHeight - annotation.y,
         size: annotation.fontSize,
         color: hexToRgb(annotation.color),
       })

@@ -1,4 +1,5 @@
-import type { Annotation, ImageAnnotation, Point, TextAnnotation } from '../types'
+import type { Annotation, ImageAnnotation, Point, StrokeAnnotation, TextAnnotation } from '../types'
+import { pdfToCanvas } from './coordinates'
 
 export type Bounds = {
   x: number
@@ -11,39 +12,58 @@ export type ResizeHandle = 'nw' | 'ne' | 'sw' | 'se'
 
 const HANDLE_SIZE = 10
 
-function measureText(annotation: TextAnnotation, context: CanvasRenderingContext2D) {
-  context.font = `${annotation.fontSize}px system-ui, sans-serif`
+function measureText(annotation: TextAnnotation, context: CanvasRenderingContext2D, scale: number) {
+  context.font = `${annotation.fontSize * scale}px system-ui, sans-serif`
   return context.measureText(annotation.text)
 }
 
 export function getTextBounds(
   annotation: TextAnnotation,
   context: CanvasRenderingContext2D,
+  scale: number,
 ): Bounds {
-  const metrics = measureText(annotation, context)
+  const metrics = measureText(annotation, context, scale)
+  const baseline = pdfToCanvas({ x: annotation.x, y: annotation.y }, scale)
   return {
-    x: annotation.x,
-    y: annotation.y - annotation.fontSize,
+    x: baseline.x,
+    y: baseline.y - annotation.fontSize * scale,
     width: Math.max(metrics.width, 8),
-    height: annotation.fontSize,
+    height: annotation.fontSize * scale,
   }
 }
 
-export function getImageBounds(annotation: ImageAnnotation): Bounds {
+export function getImageBounds(annotation: ImageAnnotation, scale: number): Bounds {
+  const topLeft = pdfToCanvas({ x: annotation.x, y: annotation.y }, scale)
   return {
-    x: annotation.x,
-    y: annotation.y,
-    width: annotation.width,
-    height: annotation.height,
+    x: topLeft.x,
+    y: topLeft.y,
+    width: annotation.width * scale,
+    height: annotation.height * scale,
+  }
+}
+
+function getStrokeBounds(annotation: StrokeAnnotation, scale: number): Bounds {
+  const points = annotation.points.map((point) => pdfToCanvas(point, scale))
+  const xs = points.map((point) => point.x)
+  const ys = points.map((point) => point.y)
+  const padding = annotation.width * scale
+
+  return {
+    x: Math.min(...xs) - padding,
+    y: Math.min(...ys) - padding,
+    width: Math.max(Math.max(...xs) - Math.min(...xs) + padding * 2, 1),
+    height: Math.max(Math.max(...ys) - Math.min(...ys) + padding * 2, 1),
   }
 }
 
 export function getAnnotationBounds(
   annotation: Annotation,
   context: CanvasRenderingContext2D,
+  scale: number,
 ): Bounds | null {
-  if (annotation.type === 'text') return getTextBounds(annotation, context)
-  if (annotation.type === 'image') return getImageBounds(annotation)
+  if (annotation.type === 'text') return getTextBounds(annotation, context, scale)
+  if (annotation.type === 'image') return getImageBounds(annotation, scale)
+  if (annotation.type === 'stroke') return getStrokeBounds(annotation, scale)
   return null
 }
 
@@ -74,17 +94,17 @@ export function hitTestAnnotation(
   annotations: Annotation[],
   pageIndex: number,
   context: CanvasRenderingContext2D,
+  scale: number,
   selectedId: string | null,
 ): { id: string; mode: 'move' | ResizeHandle } | null {
   const pageAnnotations = annotations
     .filter((annotation) => annotation.pageIndex === pageIndex)
-    .filter((annotation) => annotation.type === 'text' || annotation.type === 'image')
     .reverse()
 
   if (selectedId) {
     const selected = pageAnnotations.find((annotation) => annotation.id === selectedId)
     if (selected) {
-      const bounds = getAnnotationBounds(selected, context)
+      const bounds = getAnnotationBounds(selected, context, scale)
       if (bounds) {
         const handles = getHandlePositions(bounds)
         for (const [handle, position] of Object.entries(handles) as [ResizeHandle, Point][]) {
@@ -100,7 +120,7 @@ export function hitTestAnnotation(
   }
 
   for (const annotation of pageAnnotations) {
-    const bounds = getAnnotationBounds(annotation, context)
+    const bounds = getAnnotationBounds(annotation, context, scale)
     if (!bounds) continue
     if (isInsideBounds(point, bounds)) {
       return { id: annotation.id, mode: 'move' }
@@ -129,6 +149,15 @@ export function applyMove(
       y: annotation.y + deltaY,
     }
   }
+  if (annotation.type === 'stroke') {
+    return {
+      ...annotation,
+      points: annotation.points.map((point) => ({
+        x: point.x + deltaX,
+        y: point.y + deltaY,
+      })),
+    }
+  }
   return annotation
 }
 
@@ -138,21 +167,22 @@ export function applyResize(
   point: Point,
   startBounds: Bounds,
   startAnnotation: Annotation,
+  scale: number,
 ): Annotation {
   if (startAnnotation.type === 'text' && annotation.type === 'text') {
     const anchor = getAnchor(startBounds, handle)
     const newWidth = Math.max(Math.abs(point.x - anchor.x), 20)
     const newHeight = Math.max(Math.abs(point.y - anchor.y), 12)
-    const scale = Math.min(newWidth / startBounds.width, newHeight / startBounds.height)
-    const fontSize = Math.max(8, Math.min(120, startAnnotation.fontSize * scale))
+    const sizeScale = Math.min(newWidth / startBounds.width, newHeight / startBounds.height)
+    const fontSize = Math.max(6, Math.min(120, startAnnotation.fontSize * sizeScale))
     const width = startBounds.width * (fontSize / startAnnotation.fontSize)
-    const height = fontSize
+    const height = fontSize * scale
 
     const topLeft = getTopLeftFromAnchor(anchor, handle, width, height)
     return {
       ...annotation,
-      x: topLeft.x,
-      y: topLeft.y + height,
+      x: topLeft.x / scale,
+      y: (topLeft.y + height) / scale,
       fontSize,
     }
   }
@@ -165,10 +195,10 @@ export function applyResize(
 
     return {
       ...annotation,
-      x: topLeft.x,
-      y: topLeft.y,
-      width,
-      height,
+      x: topLeft.x / scale,
+      y: topLeft.y / scale,
+      width: width / scale,
+      height: height / scale,
     }
   }
 
@@ -203,14 +233,5 @@ function getTopLeftFromAnchor(
       return { x: anchor.x - width, y: anchor.y }
     case 'se':
       return { x: anchor.x, y: anchor.y }
-  }
-}
-
-export function boundsToPercent(bounds: Bounds, canvasWidth: number, canvasHeight: number) {
-  return {
-    left: `${(bounds.x / canvasWidth) * 100}%`,
-    top: `${(bounds.y / canvasHeight) * 100}%`,
-    width: `${(bounds.width / canvasWidth) * 100}%`,
-    height: `${(bounds.height / canvasHeight) * 100}%`,
   }
 }

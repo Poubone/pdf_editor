@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { loadPdfDocument } from '../lib/pdfLoader'
 import { downloadBytes, exportPdfWithAnnotations } from '../lib/pdfExport'
-import type { Annotation, Tool } from '../types'
+import type { Annotation, TextAnnotation, Tool } from '../types'
+import { AnnotationEditBar } from './AnnotationEditBar'
 import { PdfPage } from './PdfPage'
 import { SignatureModal } from './SignatureModal'
 import { Toolbar } from './Toolbar'
@@ -32,6 +33,7 @@ export function PdfEditor({ file, pdfBytes, onNewDocument }: PdfEditorProps) {
   } | null>(null)
   const [isExporting, setIsExporting] = useState(false)
   const exportBytesRef = useRef<ArrayBuffer>(pdfBytes)
+  const editDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     exportBytesRef.current = pdfBytes.slice(0)
@@ -60,6 +62,15 @@ export function PdfEditor({ file, pdfBytes, onNewDocument }: PdfEditorProps) {
     }
   }, [tool])
 
+  const selectedAnnotation = annotations.find((annotation) => annotation.id === selectedId) ?? null
+
+  useEffect(() => {
+    if (selectedAnnotation?.type === 'text') {
+      setFontSize(selectedAnnotation.fontSize)
+      setColor(selectedAnnotation.color)
+    }
+  }, [selectedAnnotation])
+
   const pushAnnotations = useCallback((next: Annotation[]) => {
     setAnnotations(next)
     setHistory((previous) => [...previous, next])
@@ -81,6 +92,36 @@ export function PdfEditor({ file, pdfBytes, onNewDocument }: PdfEditorProps) {
       pushAnnotations(next)
     },
     [pushAnnotations],
+  )
+
+  const updateAnnotation = useCallback(
+    (id: string, changes: Partial<TextAnnotation>, commit = true) => {
+      const next = annotations.map((annotation) => {
+        if (annotation.id !== id || annotation.type !== 'text') return annotation
+        return { ...annotation, ...changes }
+      })
+      if (commit) {
+        pushAnnotations(next)
+      } else {
+        setAnnotations(next)
+      }
+    },
+    [annotations, pushAnnotations],
+  )
+
+  const updateAnnotationDebounced = useCallback(
+    (id: string, changes: Partial<TextAnnotation>) => {
+      const next = annotations.map((annotation) => {
+        if (annotation.id !== id || annotation.type !== 'text') return annotation
+        return { ...annotation, ...changes }
+      })
+      setAnnotations(next)
+      if (editDebounceRef.current) clearTimeout(editDebounceRef.current)
+      editDebounceRef.current = setTimeout(() => {
+        pushAnnotations(next)
+      }, 400)
+    },
+    [annotations, pushAnnotations],
   )
 
   const deleteSelected = useCallback(() => {
@@ -124,19 +165,22 @@ export function PdfEditor({ file, pdfBytes, onNewDocument }: PdfEditorProps) {
     setTool('select')
   }
 
-  const placeSignature = (pageIndex: number, x: number, y: number) => {
+  const placeSignature = (pageIndex: number, x: number, y: number, renderScale: number) => {
     if (!pendingSignature) return
 
-    const scale = 0.35
+    const placementScale = 0.35
+    const width = (pendingSignature.width * placementScale) / renderScale
+    const height = (pendingSignature.height * placementScale) / renderScale
     const newId = crypto.randomUUID()
+
     addAnnotation({
       id: newId,
       type: 'image',
       pageIndex,
-      x: x - (pendingSignature.width * scale) / 2,
-      y: y - (pendingSignature.height * scale) / 2,
-      width: pendingSignature.width * scale,
-      height: pendingSignature.height * scale,
+      x: x - width / 2,
+      y: y - height / 2,
+      width,
+      height,
       dataUrl: pendingSignature.dataUrl,
     })
     setPendingSignature(null)
@@ -172,11 +216,21 @@ export function PdfEditor({ file, pdfBytes, onNewDocument }: PdfEditorProps) {
           setTool(nextTool)
         }}
         fontSize={fontSize}
-        onFontSizeChange={setFontSize}
+        onFontSizeChange={(size) => {
+          setFontSize(size)
+          if (selectedId && tool === 'select') {
+            updateAnnotation(selectedId, { fontSize: size })
+          }
+        }}
         strokeWidth={strokeWidth}
         onStrokeWidthChange={setStrokeWidth}
         color={color}
-        onColorChange={setColor}
+        onColorChange={(nextColor) => {
+          setColor(nextColor)
+          if (selectedId && tool === 'select') {
+            updateAnnotation(selectedId, { color: nextColor })
+          }
+        }}
         zoom={zoom}
         onZoomChange={setZoom}
         currentPage={currentPage}
@@ -193,6 +247,14 @@ export function PdfEditor({ file, pdfBytes, onNewDocument }: PdfEditorProps) {
         onDeleteSelected={deleteSelected}
         canDelete={Boolean(selectedId)}
       />
+
+      {tool === 'select' && selectedAnnotation && (
+        <AnnotationEditBar
+          annotation={selectedAnnotation}
+          onUpdate={updateAnnotationDebounced}
+          onDelete={deleteSelected}
+        />
+      )}
 
       <div className="editor-canvas">
         <PdfPage
