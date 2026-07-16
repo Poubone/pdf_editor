@@ -7,6 +7,7 @@ import {
   hitTestAnnotation,
   type ResizeHandle,
 } from '../lib/annotationBounds'
+import { canvasLengthToPdf, canvasToPdf, pdfLengthToCanvas, pdfToCanvas } from '../lib/coordinates'
 import { renderPageToCanvas } from '../lib/pdfLoader'
 import type { Annotation, Point, Tool } from '../types'
 import { SelectionOverlay } from './SelectionOverlay'
@@ -26,7 +27,7 @@ type PdfPageProps = {
   onAddAnnotation: (annotation: Annotation) => void
   onUpdateAnnotations: (annotations: Annotation[]) => void
   onCommitAnnotations: (annotations: Annotation[]) => void
-  onPlaceSignature: (pageIndex: number, x: number, y: number) => void
+  onPlaceSignature: (pageIndex: number, x: number, y: number, renderScale: number) => void
   onClearPendingSignature: () => void
 }
 
@@ -89,7 +90,7 @@ export function PdfPage({
   const overlayRef = useRef<HTMLCanvasElement>(null)
   const measureContextRef = useRef<CanvasRenderingContext2D | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
-  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 })
+  const [pageMetrics, setPageMetrics] = useState({ width: 0, height: 0, renderScale: 1 })
   const [isDrawing, setIsDrawing] = useState(false)
   const [currentStroke, setCurrentStroke] = useState<Point[]>([])
   const [textPrompt, setTextPrompt] = useState<{ x: number; y: number } | null>(null)
@@ -116,8 +117,12 @@ export function PdfPage({
       const page = await pdfDoc.getPage(pageIndex + 1)
       if (cancelled) return
       const dimensions = await renderPageToCanvas(page, canvas, scale)
-      setCanvasSize(dimensions)
-      redrawOverlay()
+      setPageMetrics({
+        width: dimensions.width,
+        height: dimensions.height,
+        renderScale: dimensions.scale,
+      })
+      redrawOverlay(dimensions.scale)
     }
 
     render()
@@ -128,11 +133,11 @@ export function PdfPage({
   }, [pdfDoc, pageIndex, scale])
 
   useEffect(() => {
-    redrawOverlay()
+    redrawOverlay(pageMetrics.renderScale)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [annotations, currentStroke, selectedId])
+  }, [annotations, currentStroke, selectedId, pageMetrics.renderScale])
 
-  const redrawOverlay = () => {
+  const redrawOverlay = (renderScale: number) => {
     const overlay = overlayRef.current
     const pdfCanvas = pdfCanvasRef.current
     if (!overlay || !pdfCanvas) return
@@ -149,29 +154,38 @@ export function PdfPage({
       if (annotation.pageIndex !== pageIndex) continue
 
       if (annotation.type === 'text') {
+        const position = pdfToCanvas({ x: annotation.x, y: annotation.y }, renderScale)
         context.fillStyle = annotation.color
-        context.font = `${annotation.fontSize}px system-ui, sans-serif`
-        context.fillText(annotation.text, annotation.x, annotation.y)
+        context.font = `${annotation.fontSize * renderScale}px system-ui, sans-serif`
+        context.fillText(annotation.text, position.x, position.y)
       } else if (annotation.type === 'stroke') {
-        drawStroke(context, annotation.points, annotation.color, annotation.width)
+        const canvasPoints = annotation.points.map((point) => pdfToCanvas(point, renderScale))
+        drawStroke(
+          context,
+          canvasPoints,
+          annotation.color,
+          pdfLengthToCanvas(annotation.width, renderScale),
+        )
       } else if (annotation.type === 'image') {
+        const topLeft = pdfToCanvas({ x: annotation.x, y: annotation.y }, renderScale)
         const image = getCachedImage(annotation.dataUrl)
+        const drawWidth = pdfLengthToCanvas(annotation.width, renderScale)
+        const drawHeight = pdfLengthToCanvas(annotation.height, renderScale)
         if (image.complete) {
-          context.drawImage(
-            image,
-            annotation.x,
-            annotation.y,
-            annotation.width,
-            annotation.height,
-          )
+          context.drawImage(image, topLeft.x, topLeft.y, drawWidth, drawHeight)
         } else {
-          image.onload = () => redrawOverlay()
+          image.onload = () => redrawOverlay(renderScale)
         }
       }
     }
 
     if (currentStroke.length > 0) {
-      drawStroke(context, currentStroke, color, strokeWidth)
+      drawStroke(
+        context,
+        currentStroke,
+        color,
+        pdfLengthToCanvas(strokeWidth, renderScale),
+      )
     }
   }
 
@@ -208,6 +222,8 @@ export function PdfPage({
   useEffect(() => {
     if (!dragState) return
 
+    const renderScale = pageMetrics.renderScale
+
     const handleWindowPointerMove = (event: PointerEvent) => {
       const canvas = overlayRef.current
       const measureContext = getMeasureContext()
@@ -226,21 +242,26 @@ export function PdfPage({
       )
       if (!startAnnotation) return
 
-      const startBounds = getAnnotationBounds(startAnnotation, measureContext)
+      const startBounds = getAnnotationBounds(startAnnotation, measureContext, renderScale)
       if (!startBounds) return
 
       const nextAnnotations = dragState.startAnnotations.map((annotation) => {
         if (annotation.id !== dragState.id) return annotation
 
         if (dragState.mode === 'move') {
-          return applyMove(
-            annotation,
-            point.x - dragState.startPoint.x,
-            point.y - dragState.startPoint.y,
-          )
+          const deltaX = (point.x - dragState.startPoint.x) / renderScale
+          const deltaY = (point.y - dragState.startPoint.y) / renderScale
+          return applyMove(annotation, deltaX, deltaY)
         }
 
-        return applyResize(annotation, dragState.mode, point, startBounds, startAnnotation)
+        return applyResize(
+          annotation,
+          dragState.mode,
+          point,
+          startBounds,
+          startAnnotation,
+          renderScale,
+        )
       })
 
       onUpdateAnnotations(nextAnnotations)
@@ -257,20 +278,29 @@ export function PdfPage({
       window.removeEventListener('pointermove', handleWindowPointerMove)
       window.removeEventListener('pointerup', handleWindowPointerUp)
     }
-  }, [dragState, onUpdateAnnotations, onCommitAnnotations])
+  }, [dragState, onUpdateAnnotations, onCommitAnnotations, pageMetrics.renderScale])
 
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const point = getPoint(event)
     const measureContext = getMeasureContext()
+    const renderScale = pageMetrics.renderScale
     if (!measureContext) return
 
     if (pendingSignature) {
-      onPlaceSignature(pageIndex, point.x, point.y)
+      const pdfPoint = canvasToPdf(point, renderScale)
+      onPlaceSignature(pageIndex, pdfPoint.x, pdfPoint.y, renderScale)
       return
     }
 
     if (tool === 'select') {
-      const hit = hitTestAnnotation(point, annotations, pageIndex, measureContext, selectedId)
+      const hit = hitTestAnnotation(
+        point,
+        annotations,
+        pageIndex,
+        measureContext,
+        renderScale,
+        selectedId,
+      )
       if (hit) {
         startDrag(hit.id, hit.mode, point)
         return
@@ -295,11 +325,8 @@ export function PdfPage({
   }
 
   const handlePointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    const point = getPoint(event)
-    const measureContext = getMeasureContext()
-    if (!measureContext) return
-
     if (!isDrawing || tool !== 'draw') return
+    const point = getPoint(event)
     setCurrentStroke((previous) => [...previous, point])
   }
 
@@ -308,14 +335,15 @@ export function PdfPage({
     overlayRef.current?.releasePointerCapture(event.pointerId)
     setIsDrawing(false)
 
+    const renderScale = pageMetrics.renderScale
     if (currentStroke.length >= 2) {
       onAddAnnotation({
         id: crypto.randomUUID(),
         type: 'stroke',
         pageIndex,
-        points: currentStroke,
+        points: currentStroke.map((strokePoint) => canvasToPdf(strokePoint, renderScale)),
         color,
-        width: strokeWidth,
+        width: canvasLengthToPdf(strokeWidth, renderScale),
       })
     }
     setCurrentStroke([])
@@ -327,13 +355,14 @@ export function PdfPage({
       return
     }
 
+    const pdfPoint = canvasToPdf(textPrompt, pageMetrics.renderScale)
     const newId = crypto.randomUUID()
     onAddAnnotation({
       id: newId,
       type: 'text',
       pageIndex,
-      x: textPrompt.x,
-      y: textPrompt.y,
+      x: pdfPoint.x,
+      y: pdfPoint.y,
       text: textValue.trim(),
       fontSize,
       color,
@@ -347,7 +376,7 @@ export function PdfPage({
   const measureContext = getMeasureContext()
   const selectionBounds =
     selectedAnnotation && measureContext && tool === 'select'
-      ? getAnnotationBounds(selectedAnnotation, measureContext)
+      ? getAnnotationBounds(selectedAnnotation, measureContext, pageMetrics.renderScale)
       : null
 
   const cursorClass = pendingSignature
@@ -373,11 +402,11 @@ export function PdfPage({
         onPointerUp={handlePointerUp}
         onPointerLeave={handlePointerUp}
       />
-      {selectionBounds && canvasSize.width > 0 && (
+      {selectionBounds && pageMetrics.width > 0 && (
         <SelectionOverlay
           bounds={selectionBounds}
-          canvasWidth={canvasSize.width}
-          canvasHeight={canvasSize.height}
+          canvasWidth={pageMetrics.width}
+          canvasHeight={pageMetrics.height}
           onMovePointerDown={(event) => {
             event.preventDefault()
             const point = getPoint(event)
@@ -404,7 +433,7 @@ export function PdfPage({
       )}
       {tool === 'select' && selectedId && (
         <div className="selection-hint">
-          Glissez pour déplacer · Poignées pour redimensionner
+          Glissez pour déplacer · Poignées pour redimensionner · Double-clic pour modifier le texte
         </div>
       )}
       {textPrompt && (
